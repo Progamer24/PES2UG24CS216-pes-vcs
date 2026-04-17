@@ -15,6 +15,10 @@
 #include <string.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include "index.h"
+
+// Forward declaration for object_write
+int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out);
 
 // ─── Mode Constants ─────────────────────────────────────────────────────────
 
@@ -130,8 +134,81 @@ int tree_serialize(const Tree *tree, void **data_out, size_t *len_out) {
 //
 // Returns 0 on success, -1 on error.
 int tree_from_index(ObjectID *id_out) {
-    // TODO: Implement recursive tree building
-    // (See Lab Appendix for logical steps)
-    (void)id_out;
-    return -1;
+    // Load the index
+    Index index;
+    if (index_load(&index) != 0) return -1;
+
+    // Helper function to build tree recursively
+    int build_tree(const char *prefix, ObjectID *tree_id) {
+        Tree tree = {0};
+        int prefix_len = prefix ? strlen(prefix) : 0;
+        // Track subdirs
+        char subdirs[MAX_TREE_ENTRIES][256];
+        int subdir_count = 0;
+
+        for (int i = 0; i < index.count; i++) {
+            const char *path = index.entries[i].path;
+            if (prefix_len > 0) {
+                if (strncmp(path, prefix, prefix_len) != 0) continue;
+                if (path[prefix_len] != '/' && path[prefix_len] != '\0') continue;
+                path += prefix_len + 1;
+            }
+            const char *slash = strchr(path, '/');
+            if (slash) {
+                // Directory
+                size_t dirlen = slash - path;
+                int found = 0;
+                for (int j = 0; j < subdir_count; j++) {
+                    if (strncmp(subdirs[j], path, dirlen) == 0 && subdirs[j][dirlen] == '\0') {
+                        found = 1;
+                        break;
+                    }
+                }
+                if (!found && subdir_count < MAX_TREE_ENTRIES) {
+                    if (dirlen >= sizeof(subdirs[subdir_count])) return -1;
+                    memcpy(subdirs[subdir_count], path, dirlen);
+                    subdirs[subdir_count][dirlen] = '\0';
+                    subdir_count++;
+                }
+            } else {
+                // File
+                if (tree.count >= MAX_TREE_ENTRIES) return -1;
+                if (strlen(path) >= sizeof(tree.entries[tree.count].name)) return -1;
+                TreeEntry *e = &tree.entries[tree.count++];
+                e->mode = index.entries[i].mode;
+                snprintf(e->name, sizeof(e->name), "%s", path);
+                memcpy(e->hash.hash, index.entries[i].hash.hash, HASH_SIZE);
+            }
+        }
+        // Handle subdirs
+        for (int i = 0; i < subdir_count; i++) {
+            char subprefix[512];
+            int rc_fmt;
+            if (prefix_len > 0) {
+                if (strlen(prefix) + 1 + strlen(subdirs[i]) >= sizeof(subprefix)) return -1;
+                rc_fmt = snprintf(subprefix, sizeof(subprefix), "%s/%s", prefix, subdirs[i]);
+            } else {
+                if (strlen(subdirs[i]) >= sizeof(subprefix)) return -1;
+                rc_fmt = snprintf(subprefix, sizeof(subprefix), "%s", subdirs[i]);
+            }
+            if (rc_fmt < 0 || (size_t)rc_fmt >= sizeof(subprefix)) return -1;
+            ObjectID subid;
+            if (build_tree(subprefix, &subid) != 0) return -1;
+            if (tree.count >= MAX_TREE_ENTRIES) return -1;
+            size_t name_len = strlen(subdirs[i]);
+            if (name_len >= sizeof(tree.entries[tree.count].name)) return -1;
+            TreeEntry *e = &tree.entries[tree.count++];
+            e->mode = MODE_DIR;
+            memcpy(e->name, subdirs[i], name_len + 1);
+            memcpy(e->hash.hash, subid.hash, HASH_SIZE);
+        }
+        // Serialize and write
+        void *buf = NULL;
+        size_t buflen = 0;
+        if (tree_serialize(&tree, &buf, &buflen) != 0) return -1;
+        int rc = object_write(OBJ_TREE, buf, buflen, tree_id);
+        free(buf);
+        return rc;
+    }
+    return build_tree(NULL, id_out);
 }
