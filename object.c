@@ -121,7 +121,9 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
         return 0;
     }
 
-    // 5. Create shard directory
+    // 5. Create .pes and .pes/objects directories if needed, then shard directory
+    mkdir(".pes", 0755);
+    mkdir(".pes/objects", 0755);
     char path[512];
     object_path(id_out, path, sizeof(path));
     char dir[512];
